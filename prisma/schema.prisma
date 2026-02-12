@@ -1,0 +1,93 @@
+generator client {
+  provider = "prisma-client"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model User {
+  id        Int       @id @default(autoincrement())
+  name      String
+  email     String    @unique
+  password  String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  emailVerifiedAt DateTime?
+  emailVerifyCode String?
+  emailVerifyExp  DateTime?
+
+  messages      Message[]
+  memberships   ChatRoomMember[]
+  refreshTokens RefreshToken[]
+  friendshipsSent     Friendship[] @relation("FriendshipFrom")
+  friendshipsReceived Friendship[] @relation("FriendshipTo")
+}
+
+model ChatRoom {
+  id         Int      @id @default(autoincrement())
+  name       String?
+  isGroup    Boolean  @default(false)
+  privateKey String?  @unique
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  members  ChatRoomMember[]
+  messages Message[]
+}
+
+model ChatRoomMember {
+  id        Int      @id @default(autoincrement())
+  roomId    Int
+  userId    Int
+  createdAt DateTime @default(now())
+
+  room ChatRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId])
+}
+
+model Message {
+  id        Int      @id @default(autoincrement())
+  roomId    Int
+  userId    Int
+  content   String?
+  kind      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  room ChatRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([roomId, createdAt])
+}
+
+model RefreshToken {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  tokenHash String   @unique
+  revokedAt DateTime?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model Friendship {
+  id         Int      @id @default(autoincrement())
+  fromUserId Int
+  toUserId   Int
+  status     String   @default("pending")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  fromUser User @relation("FriendshipFrom", fields: [fromUserId], references: [id])
+  toUser   User @relation("FriendshipTo",   fields: [toUserId],   references: [id])
+
+  @@unique([fromUserId, toUserId])
+  @@index([toUserId, status])
+}
