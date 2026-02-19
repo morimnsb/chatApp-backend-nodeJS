@@ -2,8 +2,12 @@
 import prisma from "../../prisma.js";
 import { randomUUID } from "crypto";
 
-// ✅ NEW: room broadcast + notify absent members
-import { broadcastRoomAndNotifyAbsent, broadcastToRoom } from "../../realtime/socket.js";
+// ✅ room broadcast + notify absent members
+import {
+  broadcastRoomAndNotifyAbsent,
+  broadcastToRoom,
+  broadcastToUser,
+} from "../../realtime/socket.js";
 
 const toInt = (v) => {
   const n = Number(v);
@@ -19,7 +23,9 @@ export async function listRooms(userId) {
     where: { members: { some: { userId: uid } } },
     orderBy: { updatedAt: "desc" },
     include: {
-      members: { include: { user: { select: { id: true, name: true, email: true } } } },
+      members: {
+        include: { user: { select: { id: true, name: true, email: true } } },
+      },
       messages: {
         orderBy: { createdAt: "desc" },
         take: 1,
@@ -47,9 +53,11 @@ export async function listConvos(userId) {
     const kind = r.isGroup ? "group" : "dm";
     const is_private = kind === "dm";
 
-    const partner = kind === "dm" ? users.find((u) => Number(u.id) !== uid) || null : null;
+    const partner =
+      kind === "dm" ? users.find((u) => Number(u.id) !== uid) || null : null;
 
-    const title = kind === "group" ? (r.name ?? null) : (partner?.name ?? partner?.email ?? null);
+    const title =
+      kind === "group" ? r.name ?? null : partner?.name ?? partner?.email ?? null;
 
     return {
       id: r.id,
@@ -68,13 +76,18 @@ export async function listConvos(userId) {
             user_id: lastMsg.userId,
             created_at: lastMsg.createdAt?.toISOString?.() ?? lastMsg.createdAt,
             user: lastMsg.user
-              ? { id: lastMsg.user.id, name: lastMsg.user.name, email: lastMsg.user.email }
+              ? {
+                  id: lastMsg.user.id,
+                  name: lastMsg.user.name,
+                  email: lastMsg.user.email,
+                }
               : undefined,
           }
         : null,
 
       last_message_text: lastMsg?.content ?? "",
-      last_message_at: lastMsg?.createdAt?.toISOString?.() ?? lastMsg?.createdAt ?? null,
+      last_message_at:
+        lastMsg?.createdAt?.toISOString?.() ?? lastMsg?.createdAt ?? null,
       updated_at: r.updatedAt?.toISOString?.() ?? r.updatedAt,
 
       isGroup: Boolean(r.isGroup),
@@ -107,7 +120,9 @@ export async function createConvo(userId, body) {
       name,
       isGroup,
       privateKey,
-      members: { create: [{ userId: uid }, ...memberIds.map((id) => ({ userId: id }))] },
+      members: {
+        create: [{ userId: uid }, ...memberIds.map((id) => ({ userId: id }))],
+      },
     },
   });
 
@@ -146,7 +161,8 @@ export async function sendMessage(userId, roomId, body) {
   });
   if (!isMember) throw Object.assign(new Error("FORBIDDEN"), { status: 403 });
 
-  const text = typeof body?.text === "string" ? body.text.trim().slice(0, 2000) : "";
+  const text =
+    typeof body?.text === "string" ? body.text.trim().slice(0, 2000) : "";
   if (!text) throw Object.assign(new Error("INVALID_TEXT"), { status: 400 });
 
   const created = await prisma.message.create({
@@ -164,14 +180,14 @@ export async function sendMessage(userId, roomId, body) {
     data: { updatedAt: new Date() },
   });
 
-  // ✅ get all members (for notify absent)
+  // ✅ members (for notify absent)
   const members = await prisma.chatRoomMember.findMany({
     where: { roomId: rid },
     select: { userId: true },
   });
   const memberIds = members.map((m) => m.userId);
 
-  // ✅ standard payload (same for room + notify)
+  // ✅ wsRouter-friendly payload
   const payload = {
     type: "message",
     room_id: rid,
@@ -183,6 +199,7 @@ export async function sendMessage(userId, roomId, body) {
       user_id: created.userId,
       sender_id: created.userId,
       content: created.content,
+      text: created.content,
       kind: created.kind ?? null,
       created_at: created.createdAt.toISOString(),
       updated_at: created.updatedAt.toISOString(),
@@ -192,11 +209,20 @@ export async function sendMessage(userId, roomId, body) {
     },
   };
 
-  // ✅ 1) to room always: "chat:message"
-  // ✅ 2) to absent users: "chat:notify"
+  // ✅ 1) room: chat:message
+  // ✅ 2) absent users: chat:notify
   broadcastRoomAndNotifyAbsent(rid, payload, memberIds, uid);
 
-  // ✅ stop typing immediately (prevents stuck typing UI)
+  // ✅ IMPORTANT FIX:
+  // Sender might NOT be joined to room yet, so also push a direct notify to sender
+  // BUT in Node we must use "chat:notify" (not "direct.message")
+  broadcastToUser(
+    uid,
+    { type: "notify", room_id: rid, roomId: rid, message: payload.message },
+    "chat:notify"
+  );
+
+  // ✅ stop typing immediately
   broadcastToRoom(
     rid,
     {
@@ -212,7 +238,6 @@ export async function sendMessage(userId, roomId, body) {
     "typing_indicator"
   );
 
-  // ✅ return the same shape (frontend-friendly)
   return { ok: true, ...payload };
 }
 
@@ -288,6 +313,45 @@ export async function sendFriendship(fromUserId, { to_user_id, content }) {
     where: { id: room.id },
     data: { updatedAt: new Date() },
   });
+
+  // ✅ payload like sendMessage (wsRouter-friendly)
+  const payload = {
+    type: "message",
+    room_id: room.id,
+    roomId: room.id,
+    message: {
+      id: dmMessage.id,
+      room_id: room.id,
+      chat_room_id: room.id,
+      user_id: dmMessage.userId,
+      sender_id: dmMessage.userId,
+      content: dmMessage.content,
+      text: dmMessage.content,
+      kind: dmMessage.kind ?? "friend_request",
+      created_at: dmMessage.createdAt.toISOString(),
+      updated_at: dmMessage.updatedAt.toISOString(),
+      user: dmMessage.user
+        ? { id: dmMessage.user.id, name: dmMessage.user.name, email: dmMessage.user.email }
+        : undefined,
+    },
+  };
+
+  // ✅ (1) room broadcast (for anyone joined) -> ChatMessagesList updates
+  broadcastToRoom(room.id, payload, "chat:message");
+
+  // ✅ (2) receiver notify (ConversationList updates even if not in room)
+  broadcastToUser(
+    toId,
+    { type: "notify", room_id: room.id, roomId: room.id, message: payload.message },
+    "chat:notify"
+  );
+
+  // ✅ (3) sender notify too (covers sender not joined yet)
+  broadcastToUser(
+    fromId,
+    { type: "notify", room_id: room.id, roomId: room.id, message: payload.message },
+    "chat:notify"
+  );
 
   let friendship = existing;
   let status = 200;

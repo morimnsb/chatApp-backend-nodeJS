@@ -138,6 +138,21 @@ export function isUserInRoom(roomId, userId) {
   return Boolean(uMap && uMap.has(uid));
 }
 
+// ✅ NEW: only broadcast typing if there is at least one OTHER user in room
+function hasOtherUsersInRoom(roomId, senderUserId) {
+  const rid = toInt(roomId);
+  const sid = toInt(senderUserId);
+  if (!rid || !sid) return false;
+
+  const uMap = roomUsers.get(rid); // Map(userId -> countSockets)
+  if (!uMap || uMap.size === 0) return false;
+
+  for (const [uid, count] of uMap.entries()) {
+    if (Number(uid) !== sid && Number(count) > 0) return true;
+  }
+  return false;
+}
+
 // ---------------------- typing indicator store ----------------------
 // key: `${roomId}:${userId}` -> timeoutId
 const typingTimers = new Map();
@@ -225,9 +240,19 @@ function buildTypingPayload({ rid, userId, isTyping, reason = null }) {
   };
 }
 
-function emitTypingToRoom({ rid, userId, isTyping, reason = null }) {
+function emitTypingToRoom({ rid, userId, isTyping, reason = null, excludeSocketId = null }) {
   if (!_io) return;
-  _io.to(`room:${rid}`).emit("typing_indicator", buildTypingPayload({ rid, userId, isTyping, reason }));
+
+  // ✅ do NOT send typing if nobody else is in the room
+  if (!hasOtherUsersInRoom(rid, userId)) return;
+
+  const payload = buildTypingPayload({ rid, userId, isTyping, reason });
+
+  if (excludeSocketId) {
+    _io.to(`room:${rid}`).except(excludeSocketId).emit("typing_indicator", payload);
+  } else {
+    _io.to(`room:${rid}`).emit("typing_indicator", payload);
+  }
 }
 
 // ---------------------- attach socket.io ----------------------
@@ -335,9 +360,15 @@ export function attachWs(
       socket.leave(`room:${rid}`);
       removeUserFromRoom(socket.id, userId, rid);
 
-      // stop typing for this room if leaving
+      // stop typing for this room if leaving (exclude sender)
       clearTypingTimer(rid, userId);
-      emitTypingToRoom({ rid, userId, isTyping: false, reason: "leave" });
+      emitTypingToRoom({
+        rid,
+        userId,
+        isTyping: false,
+        reason: "leave",
+        excludeSocketId: socket.id,
+      });
 
       log("room:leave", { userId, roomId: rid });
     });
@@ -350,7 +381,13 @@ export function attachWs(
       const typing = Boolean(isTyping);
 
       clearTypingTimer(rid, userId);
-      emitTypingToRoom({ rid, userId, isTyping: typing });
+
+      emitTypingToRoom({
+        rid,
+        userId,
+        isTyping: typing,
+        excludeSocketId: socket.id, // ✅ sender excluded
+      });
 
       if (typing) {
         const key = typingKey(rid, userId);
@@ -358,7 +395,13 @@ export function attachWs(
 
         const timeoutId = setTimeout(() => {
           typingTimers.delete(key);
-          emitTypingToRoom({ rid, userId, isTyping: false, reason: "timeout" });
+          emitTypingToRoom({
+            rid,
+            userId,
+            isTyping: false,
+            reason: "timeout",
+            excludeSocketId: socket.id, // ✅ sender excluded
+          });
         }, 3000);
 
         typingTimers.set(key, timeoutId);
@@ -380,7 +423,13 @@ export function attachWs(
       if (joined) {
         for (const rid of joined) {
           clearTypingTimer(rid, userId);
-          emitTypingToRoom({ rid, userId, isTyping: false, reason: "disconnect" });
+          emitTypingToRoom({
+            rid,
+            userId,
+            isTyping: false,
+            reason: "disconnect",
+            excludeSocketId: socket.id, // ✅ sender excluded
+          });
         }
       }
 
