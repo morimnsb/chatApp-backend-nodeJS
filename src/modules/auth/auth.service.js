@@ -97,7 +97,8 @@ export async function register(body) {
   }
 
   const password = String(body?.password ?? "");
-  const password2 = String(body?.password2 ?? body?.password_confirmation ?? "");
+  let password2 = String(body?.password2 ?? body?.password_confirmation ?? "");
+if (!password2 && password) password2 = password; // allow single-field register
 
   const errors = {};
   if (!first_name) errors.first_name = ["First name is required."];
@@ -185,26 +186,54 @@ export async function login(body) {
   const email = String(body?.email ?? "").trim().toLowerCase();
   const password = String(body?.password ?? "");
 
+  console.log("\n================ LOGIN DEBUG ================");
+  console.log("[AUTH] DATABASE_URL =", process.env.DATABASE_URL);
+  console.log("[AUTH] email input =", email);
+  console.log("[AUTH] password length =", password.length);
+
   const user = await prisma.user.findUnique({ where: { email } });
-  if (!user) throw Object.assign(new Error("INVALID_CREDENTIALS"), { status: 401 });
 
-  const ok = await bcrypt.compare(password, user.password);
-  if (!ok) throw Object.assign(new Error("INVALID_CREDENTIALS"), { status: 401 });
+  console.log("[AUTH] user found? =", Boolean(user));
+  console.log("[AUTH] user id =", user?.id);
+  console.log("[AUTH] emailVerifiedAt =", user?.emailVerifiedAt);
+  console.log(
+    "[AUTH] stored hash preview =",
+    user?.password ? String(user.password).slice(0, 15) : null
+  );
 
-  // ✅ MUST be verified
+  if (!user) {
+    console.log("[AUTH] ❌ USER NOT FOUND");
+    throw Object.assign(new Error("INVALID_CREDENTIALS"), { status: 401 });
+  }
+
+  // اگر hash لاراولی بود
+  let storedHash = String(user.password || "");
+  if (storedHash.startsWith("$2y$")) {
+    console.log("[AUTH] ⚠ converting $2y$ -> $2b$");
+    storedHash = "$2b$" + storedHash.slice(4);
+  }
+
+  let ok = false;
+  try {
+    ok = await bcrypt.compare(password, storedHash);
+  } catch (err) {
+    console.log("[AUTH] ❌ bcrypt.compare threw error =", err.message);
+  }
+
+  console.log("[AUTH] bcrypt.compare result =", ok);
+
+  if (!ok) {
+    console.log("[AUTH] ❌ PASSWORD MISMATCH");
+    throw Object.assign(new Error("INVALID_CREDENTIALS"), { status: 401 });
+  }
+
+  // verify check
   if (!user.emailVerifiedAt) {
-    // optional: if code expired, we can auto-resend here (advanced UX)
-    // (but still refuse login)
-    if (isExpired(user.emailVerifyExp)) {
-      const otp = make6DigitCode();
-      const exp = new Date(Date.now() + 15 * 60 * 1000);
-      await prisma.user.update({
-        where: { id: user.id },
-        data: { emailVerifyCode: otp, emailVerifyExp: exp },
-      });
-    }
+    console.log("[AUTH] ❌ EMAIL NOT VERIFIED");
     throwEmailNotVerified(user);
   }
+
+  console.log("[AUTH] ✅ LOGIN SUCCESS");
 
   const access_token = signAccessToken(user);
   const refresh_token = signRefreshToken(user);
