@@ -1,4 +1,4 @@
-// chat-backend-node/src/modules/chat/chat.service.js
+// chat-backend-node/src/modules/chat/chat.service.ts
 import prisma from "../../prisma.js";
 import { randomUUID } from "crypto";
 
@@ -9,13 +9,63 @@ import {
   broadcastToUser,
 } from "../../realtime/socket.js";
 
-const toInt = (v) => {
+/* ------------------------- helpers ------------------------- */
+
+const toInt = (v: unknown): number | null => {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : null;
 };
 
+const asIso = (d: unknown): string | null => {
+  if (!d) return null;
+  if (d instanceof Date) return d.toISOString();
+  const t = new Date(String(d));
+  return Number.isFinite(t.getTime()) ? t.toISOString() : String(d);
+};
+
+type PublicUser = { id: number; name: string; email: string };
+
+type WsMessage = {
+  id: number;
+  room_id: number;
+  chat_room_id: number;
+  user_id: number;
+  sender_id: number;
+  content: string | null;
+  text: string | null;
+  kind: string | null;
+  created_at: string;
+  updated_at: string;
+  user?: PublicUser;
+};
+
+type WsPacket =
+  | {
+      type: "message" | "notify";
+      room_id: number;
+      roomId: number;
+      message: WsMessage;
+    }
+  | {
+      type: "typing_indicator";
+      room_id: number;
+      roomId: number;
+      user_id: number;
+      userId: number;
+      isTyping: boolean;
+      at: number;
+      reason?: string;
+    };
+
+type CreateConvoBody = {
+  is_group?: boolean;
+  isGroup?: boolean;
+  name?: string | null;
+  member_ids?: unknown[];
+};
+
 /* ------------------------- rooms (db fetch) ------------------------- */
-export async function listRooms(userId) {
+export async function listRooms(userId: unknown) {
   const uid = toInt(userId);
   if (!uid) throw Object.assign(new Error("BAD_REQUEST"), { status: 400 });
 
@@ -23,9 +73,7 @@ export async function listRooms(userId) {
     where: { members: { some: { userId: uid } } },
     orderBy: { updatedAt: "desc" },
     include: {
-      members: {
-        include: { user: { select: { id: true, name: true, email: true } } },
-      },
+      members: { include: { user: { select: { id: true, name: true, email: true } } } },
       messages: {
         orderBy: { createdAt: "desc" },
         take: 1,
@@ -36,28 +84,25 @@ export async function listRooms(userId) {
 }
 
 /* ------------------------- conversations (standard) ------------------------- */
-export async function listConvos(userId) {
+export async function listConvos(userId: unknown) {
   const uid = toInt(userId);
   if (!uid) throw Object.assign(new Error("BAD_REQUEST"), { status: 400 });
 
   const rooms = await listRooms(uid);
 
   return rooms.map((r) => {
-    const lastMsg = r.messages?.[0] || null;
+    const lastMsg = r.messages?.[0] ?? null;
 
-    const users = (r.members || [])
+    const users: PublicUser[] = (r.members ?? [])
       .map((m) => m.user)
-      .filter(Boolean)
+      .filter((u): u is { id: number; name: string; email: string } => Boolean(u))
       .map((u) => ({ id: u.id, name: u.name, email: u.email }));
 
     const kind = r.isGroup ? "group" : "dm";
     const is_private = kind === "dm";
 
-    const partner =
-      kind === "dm" ? users.find((u) => Number(u.id) !== uid) || null : null;
-
-    const title =
-      kind === "group" ? r.name ?? null : partner?.name ?? partner?.email ?? null;
+    const partner = kind === "dm" ? users.find((u) => Number(u.id) !== uid) ?? null : null;
+    const title = kind === "group" ? (r.name ?? null) : (partner?.name ?? partner?.email ?? null);
 
     return {
       id: r.id,
@@ -72,23 +117,18 @@ export async function listConvos(userId) {
             id: lastMsg.id,
             content: lastMsg.content ?? null,
             text: lastMsg.content ?? null,
-            kind: lastMsg.kind ?? "text",
+            kind: (lastMsg as any)?.kind ?? "text",
             user_id: lastMsg.userId,
-            created_at: lastMsg.createdAt?.toISOString?.() ?? lastMsg.createdAt,
+            created_at: asIso(lastMsg.createdAt) ?? String(lastMsg.createdAt),
             user: lastMsg.user
-              ? {
-                  id: lastMsg.user.id,
-                  name: lastMsg.user.name,
-                  email: lastMsg.user.email,
-                }
+              ? { id: lastMsg.user.id, name: lastMsg.user.name, email: lastMsg.user.email }
               : undefined,
           }
         : null,
 
       last_message_text: lastMsg?.content ?? "",
-      last_message_at:
-        lastMsg?.createdAt?.toISOString?.() ?? lastMsg?.createdAt ?? null,
-      updated_at: r.updatedAt?.toISOString?.() ?? r.updatedAt,
+      last_message_at: asIso(lastMsg?.createdAt) ?? null,
+      updated_at: asIso(r.updatedAt) ?? null,
 
       isGroup: Boolean(r.isGroup),
       is_group: Boolean(r.isGroup),
@@ -102,7 +142,7 @@ export async function listConvos(userId) {
 }
 
 /* ------------------------- create convo ------------------------- */
-export async function createConvo(userId, body) {
+export async function createConvo(userId: unknown, body: CreateConvoBody) {
   const uid = toInt(userId);
   if (!uid) throw Object.assign(new Error("BAD_REQUEST"), { status: 400 });
 
@@ -110,8 +150,11 @@ export async function createConvo(userId, body) {
   const name = body?.name ?? null;
 
   const memberIds = Array.isArray(body?.member_ids)
-    ? body.member_ids.map(toInt).filter(Boolean)
+    ? body.member_ids.map(toInt).filter((x): x is number => Boolean(x))
     : [];
+
+  // ✅ prevent duplicates + prevent adding self again
+  const uniq = Array.from(new Set(memberIds)).filter((id) => id !== uid);
 
   const privateKey = !isGroup ? randomUUID() : null;
 
@@ -121,7 +164,7 @@ export async function createConvo(userId, body) {
       isGroup,
       privateKey,
       members: {
-        create: [{ userId: uid }, ...memberIds.map((id) => ({ userId: id }))],
+        create: [{ userId: uid }, ...uniq.map((id) => ({ userId: id }))],
       },
     },
   });
@@ -130,7 +173,7 @@ export async function createConvo(userId, body) {
 }
 
 /* ------------------------- list messages ------------------------- */
-export async function listMessages(userId, roomId) {
+export async function listMessages(userId: unknown, roomId: unknown) {
   const uid = toInt(userId);
   const rid = toInt(roomId);
   if (!uid || !rid) throw Object.assign(new Error("BAD_REQUEST"), { status: 400 });
@@ -147,11 +190,12 @@ export async function listMessages(userId, roomId) {
     take: 200,
   });
 
+  // NOTE: فعلاً همون shape دیتابیس رو می‌دیم (فرانت شما می‌تونه مصرف کنه)
   return messages;
 }
 
 /* ------------------------- send message (ROOM + GLOBAL NOTIFY) ------------------------- */
-export async function sendMessage(userId, roomId, body) {
+export async function sendMessage(userId: unknown, roomId: unknown, body: any) {
   const uid = toInt(userId);
   const rid = toInt(roomId);
   if (!uid || !rid) throw Object.assign(new Error("BAD_REQUEST"), { status: 400 });
@@ -161,8 +205,7 @@ export async function sendMessage(userId, roomId, body) {
   });
   if (!isMember) throw Object.assign(new Error("FORBIDDEN"), { status: 403 });
 
-  const text =
-    typeof body?.text === "string" ? body.text.trim().slice(0, 2000) : "";
+  const text = typeof body?.text === "string" ? body.text.trim().slice(0, 2000) : "";
   if (!text) throw Object.assign(new Error("INVALID_TEXT"), { status: 400 });
 
   const created = await prisma.message.create({
@@ -187,42 +230,41 @@ export async function sendMessage(userId, roomId, body) {
   });
   const memberIds = members.map((m) => m.userId);
 
-  // ✅ wsRouter-friendly payload
-  const payload = {
+  const msg: WsMessage = {
+    id: created.id,
+    room_id: rid,
+    chat_room_id: rid,
+    user_id: created.userId,
+    sender_id: created.userId,
+    content: created.content ?? null,
+    text: created.content ?? null,
+    kind: (created as any)?.kind ?? null,
+    created_at: created.createdAt.toISOString(),
+    updated_at: created.updatedAt.toISOString(),
+    user: created.user
+      ? { id: created.user.id, name: created.user.name, email: created.user.email }
+      : undefined,
+  };
+
+  const payload: WsPacket = {
     type: "message",
     room_id: rid,
     roomId: rid,
-    message: {
-      id: created.id,
-      room_id: rid,
-      chat_room_id: rid,
-      user_id: created.userId,
-      sender_id: created.userId,
-      content: created.content,
-      text: created.content,
-      kind: created.kind ?? null,
-      created_at: created.createdAt.toISOString(),
-      updated_at: created.updatedAt.toISOString(),
-      user: created.user
-        ? { id: created.user.id, name: created.user.name, email: created.user.email }
-        : undefined,
-    },
+    message: msg,
   };
 
   // ✅ 1) room: chat:message
   // ✅ 2) absent users: chat:notify
   broadcastRoomAndNotifyAbsent(rid, payload, memberIds, uid);
 
-  // ✅ IMPORTANT FIX:
-  // Sender might NOT be joined to room yet, so also push a direct notify to sender
-  // BUT in Node we must use "chat:notify" (not "direct.message")
+  // ✅ Sender might NOT be joined to room yet, push notify to sender too
   broadcastToUser(
     uid,
-    { type: "notify", room_id: rid, roomId: rid, message: payload.message },
+    { type: "notify", room_id: rid, roomId: rid, message: msg },
     "chat:notify"
   );
 
-  // ✅ stop typing immediately
+  // ✅ stop typing immediately (room broadcast)
   broadcastToRoom(
     rid,
     {
@@ -242,7 +284,7 @@ export async function sendMessage(userId, roomId, body) {
 }
 
 /* ------------------------- ensure DM room ------------------------- */
-export async function ensureDmRoom(userA, userB) {
+export async function ensureDmRoom(userA: unknown, userB: unknown) {
   const a = toInt(userA);
   const b = toInt(userB);
   if (!a || !b) throw Object.assign(new Error("BAD_REQUEST"), { status: 400 });
@@ -274,9 +316,12 @@ export async function ensureDmRoom(userA, userB) {
 }
 
 /* ------------------------- friendship ------------------------- */
-export async function sendFriendship(fromUserId, { to_user_id, content }) {
+export async function sendFriendship(
+  fromUserId: unknown,
+  input: { to_user_id?: unknown; content?: unknown }
+) {
   const fromId = toInt(fromUserId);
-  const toId = toInt(to_user_id);
+  const toId = toInt(input?.to_user_id);
   if (!fromId || !toId) return { status: 400, body: { message: "BAD_REQUEST" } };
 
   const toUser = await prisma.user.findUnique({ where: { id: toId } });
@@ -297,7 +342,9 @@ export async function sendFriendship(fromUserId, { to_user_id, content }) {
 
   const room = await ensureDmRoom(fromId, toId);
 
-  const text = (content || "").trim() || "سلام! من برایت درخواست دوستی فرستادم 🙌";
+  const text =
+    (typeof input?.content === "string" ? input.content : "").trim() ||
+    "سلام! من برایت درخواست دوستی فرستادم 🙌";
 
   const dmMessage = await prisma.message.create({
     data: {
@@ -314,51 +361,43 @@ export async function sendFriendship(fromUserId, { to_user_id, content }) {
     data: { updatedAt: new Date() },
   });
 
-  // ✅ payload like sendMessage (wsRouter-friendly)
-  const payload = {
+  const msg: WsMessage = {
+    id: dmMessage.id,
+    room_id: room.id,
+    chat_room_id: room.id,
+    user_id: dmMessage.userId,
+    sender_id: dmMessage.userId,
+    content: dmMessage.content ?? null,
+    text: dmMessage.content ?? null,
+    kind: (dmMessage as any)?.kind ?? "friend_request",
+    created_at: dmMessage.createdAt.toISOString(),
+    updated_at: dmMessage.updatedAt.toISOString(),
+    user: dmMessage.user
+      ? { id: dmMessage.user.id, name: dmMessage.user.name, email: dmMessage.user.email }
+      : undefined,
+  };
+
+  const payload: WsPacket = {
     type: "message",
     room_id: room.id,
     roomId: room.id,
-    message: {
-      id: dmMessage.id,
-      room_id: room.id,
-      chat_room_id: room.id,
-      user_id: dmMessage.userId,
-      sender_id: dmMessage.userId,
-      content: dmMessage.content,
-      text: dmMessage.content,
-      kind: dmMessage.kind ?? "friend_request",
-      created_at: dmMessage.createdAt.toISOString(),
-      updated_at: dmMessage.updatedAt.toISOString(),
-      user: dmMessage.user
-        ? { id: dmMessage.user.id, name: dmMessage.user.name, email: dmMessage.user.email }
-        : undefined,
-    },
+    message: msg,
   };
 
-  // ✅ (1) room broadcast (for anyone joined) -> ChatMessagesList updates
+  // ✅ room broadcast (for anyone joined)
   broadcastToRoom(room.id, payload, "chat:message");
 
-  // ✅ (2) receiver notify (ConversationList updates even if not in room)
-  broadcastToUser(
-    toId,
-    { type: "notify", room_id: room.id, roomId: room.id, message: payload.message },
-    "chat:notify"
-  );
+  // ✅ receiver notify
+  broadcastToUser(toId, { type: "notify", room_id: room.id, roomId: room.id, message: msg }, "chat:notify");
 
-  // ✅ (3) sender notify too (covers sender not joined yet)
-  broadcastToUser(
-    fromId,
-    { type: "notify", room_id: room.id, roomId: room.id, message: payload.message },
-    "chat:notify"
-  );
+  // ✅ sender notify too
+  broadcastToUser(fromId, { type: "notify", room_id: room.id, roomId: room.id, message: msg }, "chat:notify");
 
   let friendship = existing;
   let status = 200;
 
   if (!existing) {
     const [minId, maxId] = fromId < toId ? [fromId, toId] : [toId, fromId];
-
     friendship = await prisma.friendship.create({
       data: { fromUserId: minId, toUserId: maxId, status: "pending" },
     });
@@ -383,7 +422,7 @@ export async function sendFriendship(fromUserId, { to_user_id, content }) {
         chat_room_id: dmMessage.roomId,
         user_id: dmMessage.userId,
         content: dmMessage.content,
-        kind: dmMessage.kind,
+        kind: (dmMessage as any)?.kind,
         created_at: dmMessage.createdAt,
         user: dmMessage.user,
       },

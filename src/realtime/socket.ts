@@ -1,51 +1,108 @@
-// src/realtime/socket.js
-import { Server } from "socket.io";
-import jwt from "jsonwebtoken";
+// chat-backend-node/src/realtime/socket.ts
+import { Server, type Socket } from "socket.io";
+import jwt, { type JwtPayload } from "jsonwebtoken";
+import type { Server as HttpServer } from "http";
 
+/* ---------------------- env / debug ---------------------- */
 const DEV = process.env.NODE_ENV !== "production";
 const DEBUG = DEV && String(process.env.SOCKET_DEBUG || "true") === "true";
-const log = (...a) => DEBUG && console.log("[socket]", ...a);
+const log = (...a: any[]) => DEBUG && console.log("[socket]", ...a);
 
-// ---------------------- singleton io ----------------------
-let _io = null;
-export function getIo() {
+/* ---------------------- types ---------------------- */
+type Id = number;
+
+export type AttachWsOptions = {
+  corsOrigin?: string;
+  socketPath?: string;
+};
+
+// inbound from client
+type RoomJoinPayload = { roomId: string | number };
+type TypingIndicatorPayload = { roomId: string | number; isTyping: boolean };
+
+// outbound to client
+type PresenceOnlinePayload = { ids: number[]; count: number };
+type PresenceJoinLeavePayload = { userId: number };
+type TypingBroadcastPayload = {
+  type: "typing_indicator";
+  roomId: number;
+  room_id: number;
+  userId: number;
+  user_id: number;
+  isTyping: boolean;
+  at: number;
+  reason?: string;
+};
+
+// event maps
+type ClientToServerEvents = {
+  "room:join": (p: RoomJoinPayload) => void;
+  "room:leave": (p: RoomJoinPayload) => void;
+  typing_indicator: (p: TypingIndicatorPayload) => void;
+  typing: (p: TypingIndicatorPayload) => void;
+};
+
+type ServerToClientEvents = {
+  "presence:online": (p: PresenceOnlinePayload) => void;
+  "presence:join": (p: PresenceJoinLeavePayload) => void;
+  "presence:leave": (p: PresenceJoinLeavePayload) => void;
+
+  typing_indicator: (p: TypingBroadcastPayload) => void;
+
+  // generic (payload from services)
+  "chat:message": (p: any) => void;
+  "chat:notify": (p: any) => void;
+};
+
+type InterServerEvents = Record<string, never>;
+type SocketData = { user?: { id: Id } };
+
+type AppSocket = Socket<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>;
+type AppIo = Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>;
+
+
+
+/* ---------------------- singleton io ---------------------- */
+let _io: AppIo | null = null;
+
+export function getIo(): AppIo | null {
   return _io;
 }
 
-// ---------------------- helpers ----------------------
-const toInt = (v) => {
+/* ---------------------- helpers ---------------------- */
+const toInt = (v: unknown): number | null => {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : null;
 };
 
-function stripBearer(t) {
-  return String(t || "").replace(/^Bearer\s+/i, "").trim();
+function stripBearer(t: unknown): string {
+  return String(t ?? "").replace(/^Bearer\s+/i, "").trim();
 }
 
-function getTokenFromHandshake(socket) {
-  const t1 = socket.handshake?.auth?.token; // socketClient auth:{token}
-  const t2 = socket.handshake?.headers?.authorization; // Bearer ...
+function getTokenFromHandshake(socket: AppSocket): string {
+  const t1 = (socket.handshake as any)?.auth?.token;
+  const t2 = socket.handshake?.headers?.authorization;
   return stripBearer(t1 || t2 || "");
 }
 
-function toUserIdFromAccessToken(payload) {
-  const sub = payload?.sub ?? null;
+function toUserIdFromAccessToken(payload: JwtPayload): number | null {
+  const sub = (payload as any)?.sub;
   const n = Number(sub);
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-// ---------------------- presence store ----------------------
+/* ---------------------- presence store ---------------------- */
 // userId -> Set(socketId)
-const online = new Map();
+const online = new Map<number, Set<string>>();
 
-function setOnline(userId, socketId) {
+function setOnline(userId: unknown, socketId: string) {
   const uid = toInt(userId);
   if (!uid) return;
   if (!online.has(uid)) online.set(uid, new Set());
-  online.get(uid).add(socketId);
+  online.get(uid)!.add(socketId);
 }
 
-function setOffline(userId, socketId) {
+function setOffline(userId: unknown, socketId: string) {
   const uid = toInt(userId);
   if (!uid) return;
   const set = online.get(uid);
@@ -54,7 +111,7 @@ function setOffline(userId, socketId) {
   if (set.size === 0) online.delete(uid);
 }
 
-function onlineIds() {
+function onlineIds(): number[] {
   return Array.from(online.keys()).map(Number);
 }
 
@@ -64,18 +121,18 @@ function broadcastPresence() {
   _io.emit("presence:online", { ids, count: ids.length });
 }
 
-// ---------------------- room presence store (FIXED for multi-tab) ----------------------
+/* ---------------------- room presence store (multi-tab safe) ---------------------- */
 // roomId -> Map(userId -> countSocketsInRoom)
-const roomUsers = new Map();
+const roomUsers = new Map<number, Map<number, number>>();
 // socketId -> Set(roomId)
-const socketRooms = new Map();
+const socketRooms = new Map<string, Set<number>>();
 
-function roomMap(rid) {
+function roomMap(rid: number): Map<number, number> {
   if (!roomUsers.has(rid)) roomUsers.set(rid, new Map());
-  return roomUsers.get(rid);
+  return roomUsers.get(rid)!;
 }
 
-function addUserToRoom(socketId, userId, roomId) {
+function addUserToRoom(socketId: string, userId: unknown, roomId: unknown) {
   const sid = String(socketId);
   const uid = toInt(userId);
   const rid = toInt(roomId);
@@ -85,10 +142,10 @@ function addUserToRoom(socketId, userId, roomId) {
   uMap.set(uid, (uMap.get(uid) || 0) + 1);
 
   if (!socketRooms.has(sid)) socketRooms.set(sid, new Set());
-  socketRooms.get(sid).add(rid);
+  socketRooms.get(sid)!.add(rid);
 }
 
-function removeUserFromRoom(socketId, userId, roomId) {
+function removeUserFromRoom(socketId: string, userId: unknown, roomId: unknown) {
   const sid = String(socketId);
   const uid = toInt(userId);
   const rid = toInt(roomId);
@@ -109,7 +166,7 @@ function removeUserFromRoom(socketId, userId, roomId) {
   }
 }
 
-function cleanupSocketRooms(socketId, userId) {
+function cleanupSocketRooms(socketId: string, userId: unknown) {
   const sid = String(socketId);
   const uid = toInt(userId);
   const rSet = socketRooms.get(sid);
@@ -129,7 +186,7 @@ function cleanupSocketRooms(socketId, userId) {
   socketRooms.delete(sid);
 }
 
-export function isUserInRoom(roomId, userId) {
+export function isUserInRoom(roomId: unknown, userId: unknown): boolean {
   const rid = toInt(roomId);
   const uid = toInt(userId);
   if (!rid || !uid) return false;
@@ -138,13 +195,13 @@ export function isUserInRoom(roomId, userId) {
   return Boolean(uMap && uMap.has(uid));
 }
 
-// ✅ NEW: only broadcast typing if there is at least one OTHER user in room
-function hasOtherUsersInRoom(roomId, senderUserId) {
+// ✅ only broadcast typing if there is at least one OTHER user in room
+function hasOtherUsersInRoom(roomId: unknown, senderUserId: unknown): boolean {
   const rid = toInt(roomId);
   const sid = toInt(senderUserId);
   if (!rid || !sid) return false;
 
-  const uMap = roomUsers.get(rid); // Map(userId -> countSockets)
+  const uMap = roomUsers.get(rid);
   if (!uMap || uMap.size === 0) return false;
 
   for (const [uid, count] of uMap.entries()) {
@@ -153,18 +210,17 @@ function hasOtherUsersInRoom(roomId, senderUserId) {
   return false;
 }
 
-// ---------------------- typing indicator store ----------------------
-// key: `${roomId}:${userId}` -> timeoutId
-const typingTimers = new Map();
+/* ---------------------- typing indicator store ---------------------- */
+const typingTimers = new Map<string, NodeJS.Timeout>();
 
-function typingKey(roomId, userId) {
+function typingKey(roomId: unknown, userId: unknown): string | null {
   const rid = toInt(roomId);
   const uid = toInt(userId);
   if (!rid || !uid) return null;
   return `${rid}:${uid}`;
 }
 
-function clearTypingTimer(roomId, userId) {
+function clearTypingTimer(roomId: unknown, userId: unknown) {
   const key = typingKey(roomId, userId);
   if (!key) return;
   const t = typingTimers.get(key);
@@ -172,10 +228,10 @@ function clearTypingTimer(roomId, userId) {
   typingTimers.delete(key);
 }
 
-// ---------------------- JSON safety (fix parse error) ----------------------
-function jsonSafe(obj) {
+/* ---------------------- JSON safety ---------------------- */
+function jsonSafe<T>(obj: T): T {
   return JSON.parse(
-    JSON.stringify(obj, (k, v) => {
+    JSON.stringify(obj, (_k, v) => {
       if (typeof v === "bigint") {
         const n = Number(v);
         return Number.isSafeInteger(n) ? n : v.toString();
@@ -184,29 +240,73 @@ function jsonSafe(obj) {
       if (typeof v === "undefined") return null;
       return v;
     })
-  );
+  ) as T;
 }
 
-// ---------------------- broadcast helpers ----------------------
-export function broadcastToRoom(roomId, payload, eventName = "chat:message") {
+/* ---------------------- broadcast helpers ---------------------- */
+/* ---------------------- broadcast helpers ---------------------- */
+type KnownServerEvent = keyof ServerToClientEvents;
+
+// overloads
+export function broadcastToRoom<E extends KnownServerEvent>(
+  roomId: unknown,
+  payload: Parameters<ServerToClientEvents[E]>[0],
+  eventName: E
+): boolean;
+export function broadcastToRoom<E extends KnownServerEvent>(
+  roomId: unknown,
+  payload: Parameters<ServerToClientEvents[E]>[0],
+  eventName: E
+): boolean;
+export function broadcastToRoom(
+  roomId: unknown,
+  payload: any,
+  eventName?: string
+): boolean;
+
+export function broadcastToRoom(
+  roomId: unknown,
+  payload: any,
+  eventName: string = "chat:message"
+): boolean {
   if (!_io) return false;
   const rid = toInt(roomId);
   if (!rid) return false;
 
-  _io.to(`room:${rid}`).emit(eventName, jsonSafe(payload));
+  (_io.to(`room:${rid}`) as any).emit(eventName, jsonSafe(payload));
   return true;
 }
 
-export function broadcastToUser(userId, payload, eventName = "chat:message") {
+export function broadcastToUser<E extends KnownServerEvent>(
+  userId: unknown,
+  payload: Parameters<ServerToClientEvents[E]>[0],
+  eventName: E
+): boolean;
+export function broadcastToUser(
+  userId: unknown,
+  payload: any,
+  eventName?: string
+): boolean;
+
+export function broadcastToUser(
+  userId: unknown,
+  payload: any,
+  eventName: string = "chat:message"
+): boolean {
   if (!_io) return false;
   const uid = toInt(userId);
   if (!uid) return false;
 
-  _io.to(`user:${uid}`).emit(eventName, jsonSafe(payload));
+  (_io.to(`user:${uid}`) as any).emit(eventName, jsonSafe(payload));
   return true;
 }
 
-export function broadcastRoomAndNotifyAbsent(roomId, payload, memberUserIds = [], senderId = null) {
+export function broadcastRoomAndNotifyAbsent(
+  roomId: unknown,
+  payload: any,
+  memberUserIds: unknown[] = [],
+  senderId: unknown = null
+): boolean {
   const rid = toInt(roomId);
   if (!rid) return false;
 
@@ -226,8 +326,14 @@ export function broadcastRoomAndNotifyAbsent(roomId, payload, memberUserIds = []
   return true;
 }
 
-// ---------------------- typing emitter ----------------------
-function buildTypingPayload({ rid, userId, isTyping, reason = null }) {
+/* ---------------------- typing emitter ---------------------- */
+function buildTypingPayload(args: {
+  rid: number;
+  userId: number;
+  isTyping: boolean;
+  reason?: string | null;
+}): TypingBroadcastPayload {
+  const { rid, userId, isTyping, reason } = args;
   return {
     type: "typing_indicator",
     roomId: rid,
@@ -240,8 +346,16 @@ function buildTypingPayload({ rid, userId, isTyping, reason = null }) {
   };
 }
 
-function emitTypingToRoom({ rid, userId, isTyping, reason = null, excludeSocketId = null }) {
+function emitTypingToRoom(args: {
+  rid: number;
+  userId: number;
+  isTyping: boolean;
+  reason?: string | null;
+  excludeSocketId?: string | null;
+}) {
   if (!_io) return;
+
+  const { rid, userId, isTyping, reason = null, excludeSocketId = null } = args;
 
   // ✅ do NOT send typing if nobody else is in the room
   if (!hasOtherUsersInRoom(rid, userId)) return;
@@ -255,28 +369,32 @@ function emitTypingToRoom({ rid, userId, isTyping, reason = null, excludeSocketI
   }
 }
 
-// ---------------------- attach socket.io ----------------------
+/* ---------------------- attach socket.io ---------------------- */
 export function attachWs(
-  server,
+  server: HttpServer,
   {
-    corsOrigin = process.env.CORS_ORIGIN || "http://localhost:5173",
-    socketPath = process.env.SOCKET_PATH || "/socket.io",
-  } = {}
-) {
-  const io = new Server(server, {
+    corsOrigin = process.env.CORS_ORIGIN ?? "http://localhost:5173",
+    socketPath = process.env.SOCKET_PATH ?? "/socket.io",
+  }: AttachWsOptions = {}
+): AppIo {
+  const io: AppIo = new Server<
+    ClientToServerEvents,
+    ServerToClientEvents,
+    InterServerEvents,
+    SocketData
+  >(server, {
     path: socketPath,
     cors: {
       origin: corsOrigin,
       methods: ["GET", "POST"],
       credentials: true,
-      // ✅ do NOT hard-lock allowedHeaders (avoid preflight breaks)
     },
   });
 
   _io = io;
 
   // ---------- auth middleware ----------
-  io.use((socket, next) => {
+  io.use((socket: AppSocket, next) => {
     const token = getTokenFromHandshake(socket);
     const accessSecret = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || "";
 
@@ -291,46 +409,52 @@ export function attachWs(
     }
 
     if (!token) {
-      const err = new Error("UNAUTHORIZED");
+      const err = new Error("UNAUTHORIZED") as any;
       err.data = { reason: "missing_token" };
       return next(err);
     }
 
     if (!accessSecret) {
-      const err = new Error("UNAUTHORIZED");
+      const err = new Error("UNAUTHORIZED") as any;
       err.data = { reason: "missing_JWT_ACCESS_SECRET" };
       return next(err);
     }
 
     try {
-      const payload = jwt.verify(token, accessSecret);
+      const payload = jwt.verify(token, accessSecret) as JwtPayload;
       const userId = toUserIdFromAccessToken(payload);
 
       if (!userId) {
-        const err = new Error("UNAUTHORIZED");
+        const err = new Error("UNAUTHORIZED") as any;
         err.data = { reason: "bad_payload_no_sub", keys: Object.keys(payload || {}) };
         return next(err);
       }
 
-      socket.user = { id: userId };
+      socket.data.user = { id: userId };
       return next();
-    } catch (e) {
+    } catch (e: any) {
       if (DEBUG) log("jwt verify failed", { name: e?.name, message: e?.message });
-      const err = new Error("UNAUTHORIZED");
+      const err = new Error("UNAUTHORIZED") as any;
       err.data = { reason: "jwt_verify_failed", name: e?.name, message: e?.message };
       return next(err);
     }
   });
 
-  io.on("connection", (socket) => {
-    const userId = socket.user?.id;
+  io.on("connection", (socket: AppSocket) => {
+    const userId = socket.data.user?.id;
     log("connected", { socketId: socket.id, userId });
+
+    if (!userId) {
+      socket.disconnect(true);
+      return;
+    }
 
     setOnline(userId, socket.id);
     socket.join(`user:${userId}`);
 
     // initial presence snapshot
-    socket.emit("presence:online", { ids: onlineIds(), count: online.size });
+    const ids = onlineIds();
+socket.emit("presence:online", { ids, count: ids.length });
 
     socket.broadcast.emit("presence:join", { userId });
     broadcastPresence();
@@ -410,10 +534,39 @@ export function attachWs(
 
     // backward compatibility: legacy "typing"
     socket.on("typing", ({ roomId, isTyping }) => {
+      // ✅ DON'T socket.emit (that goes to client)
+      // ✅ reuse the same behavior
       const rid = toInt(roomId);
       if (!rid) return;
-      // route to new behavior
-      socket.emit("typing_indicator", { roomId: rid, isTyping: Boolean(isTyping) });
+
+      const typing = Boolean(isTyping);
+
+      clearTypingTimer(rid, userId);
+
+      emitTypingToRoom({
+        rid,
+        userId,
+        isTyping: typing,
+        excludeSocketId: socket.id,
+      });
+
+      if (typing) {
+        const key = typingKey(rid, userId);
+        if (!key) return;
+
+        const timeoutId = setTimeout(() => {
+          typingTimers.delete(key);
+          emitTypingToRoom({
+            rid,
+            userId,
+            isTyping: false,
+            reason: "timeout",
+            excludeSocketId: socket.id,
+          });
+        }, 3000);
+
+        typingTimers.set(key, timeoutId);
+      }
     });
 
     socket.on("disconnect", (reason) => {
