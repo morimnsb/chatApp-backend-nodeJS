@@ -70,14 +70,20 @@ export async function listRooms(userId: unknown) {
   if (!uid) throw Object.assign(new Error("BAD_REQUEST"), { status: 400 });
 
   return prisma.chatRoom.findMany({
-    where: { members: { some: { userId: uid } } },
-    orderBy: { updatedAt: "desc" },
+    where: { members: { some: { user_id: uid } } },
+    orderBy: { updated_at: "desc" },
     include: {
-      members: { include: { user: { select: { id: true, name: true, email: true } } } },
+      members: {
+        include: {
+          user: { select: { id: true, name: true, email: true } },
+        },
+      },
       messages: {
-        orderBy: { createdAt: "desc" },
+        orderBy: { created_at: "desc" },
         take: 1,
-        include: { user: { select: { id: true, name: true, email: true } } },
+        include: {
+          user: { select: { id: true, name: true, email: true } },
+        },
       },
     },
   });
@@ -98,7 +104,7 @@ export async function listConvos(userId: unknown) {
       .filter((u): u is { id: number; name: string; email: string } => Boolean(u))
       .map((u) => ({ id: u.id, name: u.name, email: u.email }));
 
-    const kind = r.isGroup ? "group" : "dm";
+    const kind = r.is_group ? "group" : "dm";
     const is_private = kind === "dm";
 
     const partner = kind === "dm" ? users.find((u) => Number(u.id) !== uid) ?? null : null;
@@ -117,9 +123,9 @@ export async function listConvos(userId: unknown) {
             id: lastMsg.id,
             content: lastMsg.content ?? null,
             text: lastMsg.content ?? null,
-            kind: (lastMsg as any)?.kind ?? "text",
-            user_id: lastMsg.userId,
-            created_at: asIso(lastMsg.createdAt) ?? String(lastMsg.createdAt),
+            kind: lastMsg.kind ?? "text",
+            user_id: lastMsg.user_id,
+            created_at: asIso(lastMsg.created_at) ?? String(lastMsg.created_at),
             user: lastMsg.user
               ? { id: lastMsg.user.id, name: lastMsg.user.name, email: lastMsg.user.email }
               : undefined,
@@ -127,11 +133,11 @@ export async function listConvos(userId: unknown) {
         : null,
 
       last_message_text: lastMsg?.content ?? "",
-      last_message_at: asIso(lastMsg?.createdAt) ?? null,
-      updated_at: asIso(r.updatedAt) ?? null,
+      last_message_at: asIso(lastMsg?.created_at) ?? null,
+      updated_at: asIso(r.updated_at) ?? null,
 
-      isGroup: Boolean(r.isGroup),
-      is_group: Boolean(r.isGroup),
+      isGroup: Boolean(r.is_group),
+      is_group: Boolean(r.is_group),
 
       partnerId: partner?.id ?? null,
       partner_id: partner?.id ?? null,
@@ -161,10 +167,10 @@ export async function createConvo(userId: unknown, body: CreateConvoBody) {
   const room = await prisma.chatRoom.create({
     data: {
       name,
-      isGroup,
-      privateKey,
+      is_group: isGroup,
+      private_key: privateKey,
       members: {
-        create: [{ userId: uid }, ...uniq.map((id) => ({ userId: id }))],
+        create: [{ user_id: uid }, ...uniq.map((id) => ({ user_id: id }))],
       },
     },
   });
@@ -179,18 +185,17 @@ export async function listMessages(userId: unknown, roomId: unknown) {
   if (!uid || !rid) throw Object.assign(new Error("BAD_REQUEST"), { status: 400 });
 
   const isMember = await prisma.chatRoomMember.findFirst({
-    where: { roomId: rid, userId: uid },
+    where: { room_id: rid, user_id: uid },
   });
   if (!isMember) throw Object.assign(new Error("FORBIDDEN"), { status: 403 });
 
   const messages = await prisma.message.findMany({
-    where: { roomId: rid },
+    where: { room_id: rid },
     include: { user: { select: { id: true, name: true, email: true } } },
-    orderBy: { createdAt: "asc" },
+    orderBy: { created_at: "asc" },
     take: 200,
   });
 
-  // NOTE: فعلاً همون shape دیتابیس رو می‌دیم (فرانت شما می‌تونه مصرف کنه)
   return messages;
 }
 
@@ -201,7 +206,7 @@ export async function sendMessage(userId: unknown, roomId: unknown, body: any) {
   if (!uid || !rid) throw Object.assign(new Error("BAD_REQUEST"), { status: 400 });
 
   const isMember = await prisma.chatRoomMember.findFirst({
-    where: { roomId: rid, userId: uid },
+    where: { room_id: rid, user_id: uid },
   });
   if (!isMember) throw Object.assign(new Error("FORBIDDEN"), { status: 403 });
 
@@ -210,8 +215,8 @@ export async function sendMessage(userId: unknown, roomId: unknown, body: any) {
 
   const created = await prisma.message.create({
     data: {
-      roomId: rid,
-      userId: uid,
+      room_id: rid,
+      user_id: uid,
       content: text,
       kind: body?.kind ?? "text",
     },
@@ -220,27 +225,26 @@ export async function sendMessage(userId: unknown, roomId: unknown, body: any) {
 
   await prisma.chatRoom.update({
     where: { id: rid },
-    data: { updatedAt: new Date() },
+    data: { updated_at: new Date() },
   });
 
-  // ✅ members (for notify absent)
   const members = await prisma.chatRoomMember.findMany({
-    where: { roomId: rid },
-    select: { userId: true },
+    where: { room_id: rid },
+    select: { user_id: true },
   });
-  const memberIds = members.map((m) => m.userId);
+  const memberIds = members.map((m) => m.user_id);
 
   const msg: WsMessage = {
     id: created.id,
     room_id: rid,
     chat_room_id: rid,
-    user_id: created.userId,
-    sender_id: created.userId,
+    user_id: created.user_id,
+    sender_id: created.user_id,
     content: created.content ?? null,
     text: created.content ?? null,
-    kind: (created as any)?.kind ?? null,
-    created_at: created.createdAt.toISOString(),
-    updated_at: created.updatedAt.toISOString(),
+    kind: created.kind ?? null,
+    created_at: created.created_at.toISOString(),
+    updated_at: created.updated_at.toISOString(),
     user: created.user
       ? { id: created.user.id, name: created.user.name, email: created.user.email }
       : undefined,
@@ -253,18 +257,14 @@ export async function sendMessage(userId: unknown, roomId: unknown, body: any) {
     message: msg,
   };
 
-  // ✅ 1) room: chat:message
-  // ✅ 2) absent users: chat:notify
   broadcastRoomAndNotifyAbsent(rid, payload, memberIds, uid);
 
-  // ✅ Sender might NOT be joined to room yet, push notify to sender too
   broadcastToUser(
     uid,
     { type: "notify", room_id: rid, roomId: rid, message: msg },
     "chat:notify"
   );
 
-  // ✅ stop typing immediately (room broadcast)
   broadcastToRoom(
     rid,
     {
@@ -291,8 +291,11 @@ export async function ensureDmRoom(userA: unknown, userB: unknown) {
 
   const existing = await prisma.chatRoom.findFirst({
     where: {
-      isGroup: false,
-      AND: [{ members: { some: { userId: a } } }, { members: { some: { userId: b } } }],
+      is_group: false,
+      AND: [
+        { members: { some: { user_id: a } } },
+        { members: { some: { user_id: b } } },
+      ],
     },
     include: {
       members: { include: { user: { select: { id: true, name: true, email: true } } } },
@@ -303,9 +306,9 @@ export async function ensureDmRoom(userA: unknown, userB: unknown) {
   const room = await prisma.chatRoom.create({
     data: {
       name: null,
-      isGroup: false,
-      privateKey: randomUUID(),
-      members: { create: [{ userId: a }, { userId: b }] },
+      is_group: false,
+      private_key: randomUUID(),
+      members: { create: [{ user_id: a }, { user_id: b }] },
     },
     include: {
       members: { include: { user: { select: { id: true, name: true, email: true } } } },
@@ -334,8 +337,8 @@ export async function sendFriendship(
   const existing = await prisma.friendship.findFirst({
     where: {
       OR: [
-        { fromUserId: fromId, toUserId: toId },
-        { fromUserId: toId, toUserId: fromId },
+        { from_user_id: fromId, to_user_id: toId },
+        { from_user_id: toId, to_user_id: fromId },
       ],
     },
   });
@@ -348,8 +351,8 @@ export async function sendFriendship(
 
   const dmMessage = await prisma.message.create({
     data: {
-      roomId: room.id,
-      userId: fromId,
+      room_id: room.id,
+      user_id: fromId,
       content: text,
       kind: "friend_request",
     },
@@ -358,20 +361,20 @@ export async function sendFriendship(
 
   await prisma.chatRoom.update({
     where: { id: room.id },
-    data: { updatedAt: new Date() },
+    data: { updated_at: new Date() },
   });
 
   const msg: WsMessage = {
     id: dmMessage.id,
     room_id: room.id,
     chat_room_id: room.id,
-    user_id: dmMessage.userId,
-    sender_id: dmMessage.userId,
+    user_id: dmMessage.user_id,
+    sender_id: dmMessage.user_id,
     content: dmMessage.content ?? null,
     text: dmMessage.content ?? null,
-    kind: (dmMessage as any)?.kind ?? "friend_request",
-    created_at: dmMessage.createdAt.toISOString(),
-    updated_at: dmMessage.updatedAt.toISOString(),
+    kind: dmMessage.kind ?? "friend_request",
+    created_at: dmMessage.created_at.toISOString(),
+    updated_at: dmMessage.updated_at.toISOString(),
     user: dmMessage.user
       ? { id: dmMessage.user.id, name: dmMessage.user.name, email: dmMessage.user.email }
       : undefined,
@@ -384,13 +387,8 @@ export async function sendFriendship(
     message: msg,
   };
 
-  // ✅ room broadcast (for anyone joined)
   broadcastToRoom(room.id, payload, "chat:message");
-
-  // ✅ receiver notify
   broadcastToUser(toId, { type: "notify", room_id: room.id, roomId: room.id, message: msg }, "chat:notify");
-
-  // ✅ sender notify too
   broadcastToUser(fromId, { type: "notify", room_id: room.id, roomId: room.id, message: msg }, "chat:notify");
 
   let friendship = existing;
@@ -399,7 +397,11 @@ export async function sendFriendship(
   if (!existing) {
     const [minId, maxId] = fromId < toId ? [fromId, toId] : [toId, fromId];
     friendship = await prisma.friendship.create({
-      data: { fromUserId: minId, toUserId: maxId, status: "pending" },
+      data: {
+        from_user_id: minId,
+        to_user_id: maxId,
+        status: "pending",
+      },
     });
     status = 201;
   }
@@ -419,11 +421,11 @@ export async function sendFriendship(
       room: roomFull,
       dm_message: {
         id: dmMessage.id,
-        chat_room_id: dmMessage.roomId,
-        user_id: dmMessage.userId,
+        chat_room_id: dmMessage.room_id,
+        user_id: dmMessage.user_id,
         content: dmMessage.content,
-        kind: (dmMessage as any)?.kind,
-        created_at: dmMessage.createdAt,
+        kind: dmMessage.kind,
+        created_at: dmMessage.created_at,
         user: dmMessage.user,
       },
     },

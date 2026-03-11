@@ -1,5 +1,5 @@
 generator client {
-  provider = "prisma-client"
+  provider = "prisma-client-js"
 }
 
 datasource db {
@@ -7,87 +7,97 @@ datasource db {
 }
 
 model User {
-  id        Int       @id @default(autoincrement())
-  name      String
-  email     String    @unique
-  password  String
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  id              Int      @id @default(autoincrement())
+  name            String
+  email           String   @unique
+  password        String
 
-  emailVerifiedAt DateTime?
-  emailVerifyCode String?
-  emailVerifyExp  DateTime?
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
 
-  messages      Message[]
-  memberships   ChatRoomMember[]
-  refreshTokens RefreshToken[]
-  friendshipsSent     Friendship[] @relation("FriendshipFrom")
-  friendshipsReceived Friendship[] @relation("FriendshipTo")
+  email_verified_at DateTime?
+  email_verify_code String?
+  email_verify_exp  DateTime?
+
+  messages        Message[]
+  memberships     ChatRoomMember[]
+  refresh_tokens  RefreshToken[]
+
+  friendships_sent     Friendship[] @relation("FriendshipFrom")
+  friendships_received Friendship[] @relation("FriendshipTo")
+
+  @@map("users")
 }
 
 model ChatRoom {
-  id         Int      @id @default(autoincrement())
-  name       String?
-  isGroup    Boolean  @default(false)
-  privateKey String?  @unique
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id           Int      @id @default(autoincrement())
+  name         String?
+  is_group     Boolean  @default(false)
+  private_key  String?  @unique
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
 
-  members  ChatRoomMember[]
-  messages Message[]
+  members   ChatRoomMember[]
+  messages  Message[]
+
+  @@map("chat_rooms")
 }
 
 model ChatRoomMember {
-  id        Int      @id @default(autoincrement())
-  roomId    Int
-  userId    Int
-  createdAt DateTime @default(now())
+  id         Int      @id @default(autoincrement())
+  room_id    Int
+  user_id    Int
+  created_at DateTime @default(now())
 
-  room ChatRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  user User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room ChatRoom @relation(fields: [room_id], references: [id], onDelete: Cascade)
+  user User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
-  @@unique([roomId, userId])
+  @@unique([room_id, user_id])
+  @@map("chat_room_members")
 }
 
 model Message {
-  id        Int      @id @default(autoincrement())
-  roomId    Int
-  userId    Int
-  content   String?
-  kind      String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id         Int      @id @default(autoincrement())
+  room_id    Int
+  user_id    Int
+  content    String?
+  kind       String?
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
 
-  room ChatRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  user User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room ChatRoom @relation(fields: [room_id], references: [id], onDelete: Cascade)
+  user User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
-  @@index([roomId, createdAt])
+  @@index([room_id, created_at])
+  @@map("messages")
 }
 
 model RefreshToken {
-  id        Int      @id @default(autoincrement())
-  userId    Int
-  tokenHash String   @unique
-  revokedAt DateTime?
-  expiresAt DateTime
-  createdAt DateTime @default(now())
+  id          Int      @id @default(autoincrement())
+  user_id     Int
+  token_hash  String   @unique
+  revoked_at  DateTime?
+  expires_at  DateTime
+  created_at  DateTime @default(now())
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
-  @@index([userId, expiresAt])
+  @@index([user_id, expires_at])
+  @@map("refresh_tokens")
 }
 
 model Friendship {
-  id         Int      @id @default(autoincrement())
-  fromUserId Int
-  toUserId   Int
-  status     String   @default("pending")
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id           Int      @id @default(autoincrement())
+  from_user_id Int
+  to_user_id   Int
+  status       String   @default("pending")
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
 
-  fromUser User @relation("FriendshipFrom", fields: [fromUserId], references: [id])
-  toUser   User @relation("FriendshipTo",   fields: [toUserId],   references: [id])
+  from_user User @relation("FriendshipFrom", fields: [from_user_id], references: [id])
+  to_user   User @relation("FriendshipTo",   fields: [to_user_id],   references: [id])
 
-  @@unique([fromUserId, toUserId])
-  @@index([toUserId, status])
+  @@unique([from_user_id, to_user_id])
+  @@index([to_user_id, status])
+  @@map("friendships")
 }

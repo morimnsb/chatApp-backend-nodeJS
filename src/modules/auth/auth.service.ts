@@ -39,7 +39,7 @@ export type PublicUser = { id: number; name: string; email: string };
 export type RegisterResult = {
   ok: true;
   message: string;
-  user: { id: number; name: string; email: string; emailVerifiedAt: Date | null };
+  user: { id: number; name: string; email: string; email_verified_at: Date | null };
   otp?: string; // dev only
 };
 
@@ -72,9 +72,9 @@ type UserAuthRow = {
   name: string;
   email: string;
   password: string;
-  emailVerifiedAt: Date | null;
-  emailVerifyCode: string | null;
-  emailVerifyExp: Date | null;
+  email_verified_at: Date | null;
+  email_verify_code: string | null;
+  email_verify_exp: Date | null;
 };
 
 /* ----------------------------- helpers ----------------------------- */
@@ -93,7 +93,6 @@ function mustEnv(name: string): string {
 function make6DigitCode(): string {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
-
 
 function signAccessToken(user: { id: number; email: string; name: string }): string {
   const secret =
@@ -170,7 +169,7 @@ function normalizePassword(v: unknown): string {
 }
 
 function parseUserIdFromSub(payload: JwtPayload): number | null {
-  const sub = (payload as any)?.sub;
+  const sub = (payload as JwtPayload & { sub?: string | number }).sub;
   const userId = Number(sub);
   return Number.isFinite(userId) && userId > 0 ? userId : null;
 }
@@ -183,9 +182,9 @@ async function getUserAuthByEmail(email: string): Promise<UserAuthRow | null> {
       name: true,
       email: true,
       password: true,
-      emailVerifiedAt: true,
-      emailVerifyCode: true,
-      emailVerifyExp: true,
+      email_verified_at: true,
+      email_verify_code: true,
+      email_verify_exp: true,
     },
   });
 }
@@ -236,11 +235,11 @@ export async function register(body: RegisterBody): Promise<RegisterResult> {
       name,
       email,
       password: passwordHash,
-      emailVerifyCode: otp,
-      emailVerifyExp: exp,
-      emailVerifiedAt: null,
+      email_verify_code: otp,
+      email_verify_exp: exp,
+      email_verified_at: null,
     },
-    select: { id: true, name: true, email: true, emailVerifiedAt: true },
+    select: { id: true, name: true, email: true, email_verified_at: true },
   });
 
   return {
@@ -259,7 +258,7 @@ export async function resendVerifyCode(
 
   const user = await prisma.user.findUnique({
     where: { email },
-    select: { id: true, emailVerifiedAt: true },
+    select: { id: true, email_verified_at: true },
   });
 
   if (!user) {
@@ -269,14 +268,14 @@ export async function resendVerifyCode(
     });
   }
 
-  if (user.emailVerifiedAt) return { ok: true, message: "ALREADY_VERIFIED" };
+  if (user.email_verified_at) return { ok: true, message: "ALREADY_VERIFIED" };
 
   const otp = make6DigitCode();
   const exp = new Date(Date.now() + 15 * 60 * 1000);
 
   await prisma.user.update({
     where: { id: user.id },
-    data: { emailVerifyCode: otp, emailVerifyExp: exp },
+    data: { email_verify_code: otp, email_verify_exp: exp },
   });
 
   return { ok: true, message: "VERIFY_CODE_SENT", otp };
@@ -296,7 +295,7 @@ export async function login(body: LoginBody): Promise<LoginResult> {
   const ok = await bcrypt.compare(password, storedHash).catch(() => false);
   if (!ok) throw Object.assign(new Error("INVALID_CREDENTIALS"), { status: 401 });
 
-  if (!user.emailVerifiedAt) {
+  if (!user.email_verified_at) {
     throwEmailNotVerified({ id: user.id, email: user.email });
   }
 
@@ -308,7 +307,11 @@ export async function login(body: LoginBody): Promise<LoginResult> {
   const expiresAt = new Date(Date.now() + refreshMs);
 
   await prisma.refreshToken.create({
-    data: { userId: user.id, tokenHash, expiresAt },
+    data: {
+      user_id: user.id,
+      token_hash: tokenHash,
+      expires_at: expiresAt,
+    },
   });
 
   return {
@@ -340,24 +343,38 @@ export async function refresh(refresh_token?: string): Promise<RefreshResult> {
   const tokenHash = sha256(refresh_token);
 
   const row = await prisma.refreshToken.findUnique({
-    where: { tokenHash },
-    select: { tokenHash: true, revokedAt: true, expiresAt: true },
+    where: { token_hash: tokenHash },
+    select: {
+      token_hash: true,
+      revoked_at: true,
+      expires_at: true,
+    },
   });
 
-  if (!row || row.revokedAt) throw Object.assign(new Error("REFRESH_REVOKED"), { status: 401 });
-  if (row.expiresAt.getTime() < Date.now()) throw Object.assign(new Error("REFRESH_EXPIRED"), { status: 401 });
+  if (!row || row.revoked_at) {
+    throw Object.assign(new Error("REFRESH_REVOKED"), { status: 401 });
+  }
+
+  if (row.expires_at.getTime() < Date.now()) {
+    throw Object.assign(new Error("REFRESH_EXPIRED"), { status: 401 });
+  }
 
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, name: true, email: true, emailVerifiedAt: true },
+    select: { id: true, name: true, email: true, email_verified_at: true },
   });
+
   if (!user) throw Object.assign(new Error("USER_NOT_FOUND"), { status: 401 });
 
-  if (!user.emailVerifiedAt) throwEmailNotVerified({ id: user.id, email: user.email });
+  if (!user.email_verified_at) throwEmailNotVerified({ id: user.id, email: user.email });
 
   const access_token = signAccessToken({ id: user.id, email: user.email, name: user.name });
 
-  return { ok: true, access_token, user: { id: user.id, name: user.name, email: user.email } };
+  return {
+    ok: true,
+    access_token,
+    user: { id: user.id, name: user.name, email: user.email },
+  };
 }
 
 export async function logout(refresh_token?: string): Promise<void> {
@@ -366,8 +383,13 @@ export async function logout(refresh_token?: string): Promise<void> {
   const tokenHash = sha256(refresh_token);
 
   await prisma.refreshToken.updateMany({
-    where: { tokenHash, revokedAt: null },
-    data: { revokedAt: new Date() },
+    where: {
+      token_hash: tokenHash,
+      revoked_at: null,
+    },
+    data: {
+      revoked_at: new Date(),
+    },
   });
 }
 
@@ -391,9 +413,9 @@ export async function verifyEmail(body: VerifyEmailBody): Promise<VerifyEmailRes
       id: true,
       name: true,
       email: true,
-      emailVerifiedAt: true,
-      emailVerifyCode: true,
-      emailVerifyExp: true,
+      email_verified_at: true,
+      email_verify_code: true,
+      email_verify_exp: true,
     },
   });
 
@@ -404,7 +426,7 @@ export async function verifyEmail(body: VerifyEmailBody): Promise<VerifyEmailRes
     });
   }
 
-  if (user.emailVerifiedAt) {
+  if (user.email_verified_at) {
     const access_token = signAccessToken({ id: user.id, email: user.email, name: user.name });
     return {
       ok: true,
@@ -418,7 +440,11 @@ export async function verifyEmail(body: VerifyEmailBody): Promise<VerifyEmailRes
   if (otp === MASTER_OTP) {
     const updated = await prisma.user.update({
       where: { id: user.id },
-      data: { emailVerifiedAt: new Date(), emailVerifyCode: null, emailVerifyExp: null },
+      data: {
+        email_verified_at: new Date(),
+        email_verify_code: null,
+        email_verify_exp: null,
+      },
       select: { id: true, name: true, email: true },
     });
 
@@ -433,21 +459,21 @@ export async function verifyEmail(body: VerifyEmailBody): Promise<VerifyEmailRes
     };
   }
 
-  if (!user.emailVerifyCode || !user.emailVerifyExp) {
+  if (!user.email_verify_code || !user.email_verify_exp) {
     throw Object.assign(new Error("NO_VERIFY_REQUEST"), {
       status: 400,
       meta: { code: "NO_VERIFY_REQUEST", email },
     });
   }
 
-  if (user.emailVerifyExp.getTime() < Date.now()) {
+  if (user.email_verify_exp.getTime() < Date.now()) {
     throw Object.assign(new Error("VERIFY_CODE_EXPIRED"), {
       status: 400,
-      meta: { code: "VERIFY_CODE_EXPIRED", email, exp: user.emailVerifyExp.toISOString() },
+      meta: { code: "VERIFY_CODE_EXPIRED", email, exp: user.email_verify_exp.toISOString() },
     });
   }
 
-  if (String(user.emailVerifyCode).trim() !== otp) {
+  if (String(user.email_verify_code).trim() !== otp) {
     throw Object.assign(new Error("VERIFY_CODE_INVALID"), {
       status: 400,
       meta: { code: "VERIFY_CODE_INVALID", email },
@@ -456,7 +482,11 @@ export async function verifyEmail(body: VerifyEmailBody): Promise<VerifyEmailRes
 
   const updated = await prisma.user.update({
     where: { id: user.id },
-    data: { emailVerifiedAt: new Date(), emailVerifyCode: null, emailVerifyExp: null },
+    data: {
+      email_verified_at: new Date(),
+      email_verify_code: null,
+      email_verify_exp: null,
+    },
     select: { id: true, name: true, email: true },
   });
 
@@ -473,11 +503,12 @@ export async function verifyEmail(body: VerifyEmailBody): Promise<VerifyEmailRes
 
 export async function me(
   userId: number
-): Promise<{ id: number; name: string; email: string; emailVerifiedAt: Date | null }> {
+): Promise<{ id: number; name: string; email: string; email_verified_at: Date | null }> {
   const user = await prisma.user.findUnique({
     where: { id: Number(userId) },
-    select: { id: true, name: true, email: true, emailVerifiedAt: true },
+    select: { id: true, name: true, email: true, email_verified_at: true },
   });
+
   if (!user) throw Object.assign(new Error("USER_NOT_FOUND"), { status: 404 });
   return user;
 }
