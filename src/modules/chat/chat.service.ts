@@ -1,8 +1,6 @@
-// chat-backend-node/src/modules/chat/chat.service.ts
+// C:\Users\31687\Desktop\chat-backend-node\src\modules\chat\chat.service.ts
 import prisma from "../../prisma.js";
 import { randomUUID } from "crypto";
-
-// ✅ room broadcast + notify absent members
 import {
   broadcastRoomAndNotifyAbsent,
   broadcastToRoom,
@@ -25,6 +23,8 @@ const asIso = (d: unknown): string | null => {
 
 type PublicUser = { id: number; name: string; email: string };
 
+type PublicMember = { id: number; name: string };
+
 type WsMessage = {
   id: number;
   room_id: number;
@@ -36,11 +36,33 @@ type WsMessage = {
   kind: string | null;
   created_at: string;
   updated_at: string;
+  createdAt: string;
+  updatedAt: string;
   user?: PublicUser;
+};
+
+type ConversationShape = {
+  id: number;
+  kind: "dm" | "group";
+  is_private: boolean;
+  title: string | null;
+  name: string | null;
+  users: PublicUser[];
+  members: PublicMember[];
+  last_message: WsMessage | null;
+  last_message_text: string;
+  last_message_at: string | null;
+  updated_at: string | null;
+  isGroup: boolean;
+  is_group: boolean;
+  partnerId: number | null;
+  partner_id: number | null;
+  unread_count: number;
 };
 
 type WsPacket =
   | {
+      ok?: true;
       type: "message" | "notify";
       room_id: number;
       roomId: number;
@@ -62,9 +84,120 @@ type CreateConvoBody = {
   isGroup?: boolean;
   name?: string | null;
   member_ids?: unknown[];
+  members?: unknown[];
 };
 
+function shapeUser(
+  user: { id: number; name: string; email: string } | null | undefined
+): PublicUser | undefined {
+  if (!user) return undefined;
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+  };
+}
+
+function shapeMessage(m: {
+  id: number;
+  room_id: number;
+  user_id: number;
+  content: string | null;
+  kind: string | null;
+  created_at: Date;
+  updated_at: Date;
+  user?: { id: number; name: string; email: string } | null;
+}): WsMessage {
+  const created = m.created_at.toISOString();
+  const updated = m.updated_at.toISOString();
+
+  return {
+    id: m.id,
+    room_id: m.room_id,
+    chat_room_id: m.room_id,
+    user_id: m.user_id,
+    sender_id: m.user_id,
+    content: m.content ?? null,
+    text: m.content ?? null,
+    kind: m.kind ?? "text",
+    created_at: created,
+    updated_at: updated,
+    createdAt: created,
+    updatedAt: updated,
+    user: shapeUser(m.user),
+  };
+}
+
+function shapeConversation(
+  room: {
+    id: number;
+    name: string | null;
+    is_group: boolean;
+    updated_at: Date;
+    members?: Array<{
+      user?: { id: number; name: string; email: string } | null;
+    }>;
+    messages?: Array<{
+      id: number;
+      room_id: number;
+      user_id: number;
+      content: string | null;
+      kind: string | null;
+      created_at: Date;
+      updated_at: Date;
+      user?: { id: number; name: string; email: string } | null;
+    }>;
+  },
+  currentUserId: number
+): ConversationShape {
+  const users: PublicUser[] = (room.members ?? [])
+    .map((m) => m.user)
+    .filter((u): u is { id: number; name: string; email: string } => Boolean(u))
+    .map((u) => ({ id: u.id, name: u.name, email: u.email }));
+
+  const members: PublicMember[] = users.map((u) => ({
+    id: u.id,
+    name: u.name,
+  }));
+
+  const kind: "dm" | "group" = room.is_group ? "group" : "dm";
+  const is_private = kind === "dm";
+
+  const partner =
+    kind === "dm"
+      ? users.find((u) => Number(u.id) !== Number(currentUserId)) ?? null
+      : null;
+
+  const title =
+    kind === "group"
+      ? (room.name ?? null)
+      : (partner?.name ?? partner?.email ?? null);
+
+  const lastRaw = room.messages?.[0] ?? null;
+  const last_message = lastRaw ? shapeMessage(lastRaw) : null;
+
+  return {
+    id: room.id,
+    kind,
+    is_private,
+    title,
+    name: title,
+    users,
+    members,
+    last_message,
+    last_message_text: last_message?.text ?? "",
+    last_message_at: last_message?.created_at ?? null,
+    updated_at: asIso(room.updated_at),
+    isGroup: Boolean(room.is_group),
+    is_group: Boolean(room.is_group),
+    partnerId: partner?.id ?? null,
+    partner_id: partner?.id ?? null,
+    unread_count: 0,
+  };
+}
+
 /* ------------------------- rooms (db fetch) ------------------------- */
+
 export async function listRooms(userId: unknown) {
   const uid = toInt(userId);
   if (!uid) throw Object.assign(new Error("BAD_REQUEST"), { status: 400 });
@@ -90,64 +223,17 @@ export async function listRooms(userId: unknown) {
 }
 
 /* ------------------------- conversations (standard) ------------------------- */
+
 export async function listConvos(userId: unknown) {
   const uid = toInt(userId);
   if (!uid) throw Object.assign(new Error("BAD_REQUEST"), { status: 400 });
 
   const rooms = await listRooms(uid);
-
-  return rooms.map((r) => {
-    const lastMsg = r.messages?.[0] ?? null;
-
-    const users: PublicUser[] = (r.members ?? [])
-      .map((m) => m.user)
-      .filter((u): u is { id: number; name: string; email: string } => Boolean(u))
-      .map((u) => ({ id: u.id, name: u.name, email: u.email }));
-
-    const kind = r.is_group ? "group" : "dm";
-    const is_private = kind === "dm";
-
-    const partner = kind === "dm" ? users.find((u) => Number(u.id) !== uid) ?? null : null;
-    const title = kind === "group" ? (r.name ?? null) : (partner?.name ?? partner?.email ?? null);
-
-    return {
-      id: r.id,
-      kind,
-      is_private,
-      title,
-      name: title,
-      users,
-
-      last_message: lastMsg
-        ? {
-            id: lastMsg.id,
-            content: lastMsg.content ?? null,
-            text: lastMsg.content ?? null,
-            kind: lastMsg.kind ?? "text",
-            user_id: lastMsg.user_id,
-            created_at: asIso(lastMsg.created_at) ?? String(lastMsg.created_at),
-            user: lastMsg.user
-              ? { id: lastMsg.user.id, name: lastMsg.user.name, email: lastMsg.user.email }
-              : undefined,
-          }
-        : null,
-
-      last_message_text: lastMsg?.content ?? "",
-      last_message_at: asIso(lastMsg?.created_at) ?? null,
-      updated_at: asIso(r.updated_at) ?? null,
-
-      isGroup: Boolean(r.is_group),
-      is_group: Boolean(r.is_group),
-
-      partnerId: partner?.id ?? null,
-      partner_id: partner?.id ?? null,
-
-      unread_count: 0,
-    };
-  });
+  return rooms.map((room) => shapeConversation(room, uid));
 }
 
 /* ------------------------- create convo ------------------------- */
+
 export async function createConvo(userId: unknown, body: CreateConvoBody) {
   const uid = toInt(userId);
   if (!uid) throw Object.assign(new Error("BAD_REQUEST"), { status: 400 });
@@ -155,13 +241,17 @@ export async function createConvo(userId: unknown, body: CreateConvoBody) {
   const isGroup = Boolean(body?.is_group ?? body?.isGroup);
   const name = body?.name ?? null;
 
-  const memberIds = Array.isArray(body?.member_ids)
-    ? body.member_ids.map(toInt).filter((x): x is number => Boolean(x))
-    : [];
+  const rawMemberIds = Array.isArray(body?.member_ids)
+    ? body.member_ids
+    : Array.isArray(body?.members)
+      ? body.members
+      : [];
 
-  // ✅ prevent duplicates + prevent adding self again
+  const memberIds = rawMemberIds
+    .map(toInt)
+    .filter((x): x is number => Boolean(x));
+
   const uniq = Array.from(new Set(memberIds)).filter((id) => id !== uid);
-
   const privateKey = !isGroup ? randomUUID() : null;
 
   const room = await prisma.chatRoom.create({
@@ -173,12 +263,30 @@ export async function createConvo(userId: unknown, body: CreateConvoBody) {
         create: [{ user_id: uid }, ...uniq.map((id) => ({ user_id: id }))],
       },
     },
+    include: {
+      members: {
+        include: {
+          user: { select: { id: true, name: true, email: true } },
+        },
+      },
+      messages: {
+        orderBy: { created_at: "desc" },
+        take: 1,
+        include: {
+          user: { select: { id: true, name: true, email: true } },
+        },
+      },
+    },
   });
 
-  return { ok: true, room };
+  return {
+    ok: true,
+    room: shapeConversation(room, uid),
+  };
 }
 
 /* ------------------------- list messages ------------------------- */
+
 export async function listMessages(userId: unknown, roomId: unknown) {
   const uid = toInt(userId);
   const rid = toInt(roomId);
@@ -187,19 +295,25 @@ export async function listMessages(userId: unknown, roomId: unknown) {
   const isMember = await prisma.chatRoomMember.findFirst({
     where: { room_id: rid, user_id: uid },
   });
-  if (!isMember) throw Object.assign(new Error("FORBIDDEN"), { status: 403 });
+
+  if (!isMember) {
+    throw Object.assign(new Error("FORBIDDEN"), { status: 403 });
+  }
 
   const messages = await prisma.message.findMany({
     where: { room_id: rid },
-    include: { user: { select: { id: true, name: true, email: true } } },
+    include: {
+      user: { select: { id: true, name: true, email: true } },
+    },
     orderBy: { created_at: "asc" },
     take: 200,
   });
 
-  return messages;
+  return messages.map(shapeMessage);
 }
 
-/* ------------------------- send message (ROOM + GLOBAL NOTIFY) ------------------------- */
+/* ------------------------- send message ------------------------- */
+
 export async function sendMessage(userId: unknown, roomId: unknown, body: any) {
   const uid = toInt(userId);
   const rid = toInt(roomId);
@@ -208,10 +322,18 @@ export async function sendMessage(userId: unknown, roomId: unknown, body: any) {
   const isMember = await prisma.chatRoomMember.findFirst({
     where: { room_id: rid, user_id: uid },
   });
-  if (!isMember) throw Object.assign(new Error("FORBIDDEN"), { status: 403 });
 
-  const text = typeof body?.text === "string" ? body.text.trim().slice(0, 2000) : "";
-  if (!text) throw Object.assign(new Error("INVALID_TEXT"), { status: 400 });
+  if (!isMember) {
+    throw Object.assign(new Error("FORBIDDEN"), { status: 403 });
+  }
+
+  const text = String(body?.text ?? body?.content ?? "")
+    .trim()
+    .slice(0, 2000);
+
+  if (!text) {
+    throw Object.assign(new Error("INVALID_TEXT"), { status: 400 });
+  }
 
   const created = await prisma.message.create({
     data: {
@@ -220,7 +342,9 @@ export async function sendMessage(userId: unknown, roomId: unknown, body: any) {
       content: text,
       kind: body?.kind ?? "text",
     },
-    include: { user: { select: { id: true, name: true, email: true } } },
+    include: {
+      user: { select: { id: true, name: true, email: true } },
+    },
   });
 
   await prisma.chatRoom.update({
@@ -232,38 +356,29 @@ export async function sendMessage(userId: unknown, roomId: unknown, body: any) {
     where: { room_id: rid },
     select: { user_id: true },
   });
+
   const memberIds = members.map((m) => m.user_id);
+  const msg = shapeMessage(created);
 
-  const msg: WsMessage = {
-    id: created.id,
-    room_id: rid,
-    chat_room_id: rid,
-    user_id: created.user_id,
-    sender_id: created.user_id,
-    content: created.content ?? null,
-    text: created.content ?? null,
-    kind: created.kind ?? null,
-    created_at: created.created_at.toISOString(),
-    updated_at: created.updated_at.toISOString(),
-    user: created.user
-      ? { id: created.user.id, name: created.user.name, email: created.user.email }
-      : undefined,
-  };
-
-  const payload: WsPacket = {
+  const roomPayload: WsPacket = {
+    ok: true,
     type: "message",
     room_id: rid,
     roomId: rid,
     message: msg,
   };
 
-  broadcastRoomAndNotifyAbsent(rid, payload, memberIds, uid);
+  const selfNotifyPayload: WsPacket = {
+    ok: true,
+    type: "notify",
+    room_id: rid,
+    roomId: rid,
+    message: msg,
+  };
 
-  broadcastToUser(
-    uid,
-    { type: "notify", room_id: rid, roomId: rid, message: msg },
-    "chat:notify"
-  );
+  broadcastRoomAndNotifyAbsent(rid, roomPayload, memberIds, uid);
+
+  broadcastToUser(uid, selfNotifyPayload, "chat:notify");
 
   broadcastToRoom(
     rid,
@@ -280,10 +395,11 @@ export async function sendMessage(userId: unknown, roomId: unknown, body: any) {
     "typing_indicator"
   );
 
-  return { ok: true, ...payload };
+  return roomPayload;
 }
 
 /* ------------------------- ensure DM room ------------------------- */
+
 export async function ensureDmRoom(userA: unknown, userB: unknown) {
   const a = toInt(userA);
   const b = toInt(userB);
@@ -298,12 +414,24 @@ export async function ensureDmRoom(userA: unknown, userB: unknown) {
       ],
     },
     include: {
-      members: { include: { user: { select: { id: true, name: true, email: true } } } },
+      members: {
+        include: {
+          user: { select: { id: true, name: true, email: true } },
+        },
+      },
+      messages: {
+        orderBy: { created_at: "desc" },
+        take: 1,
+        include: {
+          user: { select: { id: true, name: true, email: true } },
+        },
+      },
     },
   });
+
   if (existing) return existing;
 
-  const room = await prisma.chatRoom.create({
+  return prisma.chatRoom.create({
     data: {
       name: null,
       is_group: false,
@@ -311,14 +439,24 @@ export async function ensureDmRoom(userA: unknown, userB: unknown) {
       members: { create: [{ user_id: a }, { user_id: b }] },
     },
     include: {
-      members: { include: { user: { select: { id: true, name: true, email: true } } } },
+      members: {
+        include: {
+          user: { select: { id: true, name: true, email: true } },
+        },
+      },
+      messages: {
+        orderBy: { created_at: "desc" },
+        take: 1,
+        include: {
+          user: { select: { id: true, name: true, email: true } },
+        },
+      },
     },
   });
-
-  return room;
 }
 
 /* ------------------------- friendship ------------------------- */
+
 export async function sendFriendship(
   fromUserId: unknown,
   input: { to_user_id?: unknown; content?: unknown }
@@ -356,7 +494,9 @@ export async function sendFriendship(
       content: text,
       kind: "friend_request",
     },
-    include: { user: { select: { id: true, name: true, email: true } } },
+    include: {
+      user: { select: { id: true, name: true, email: true } },
+    },
   });
 
   await prisma.chatRoom.update({
@@ -364,32 +504,27 @@ export async function sendFriendship(
     data: { updated_at: new Date() },
   });
 
-  const msg: WsMessage = {
-    id: dmMessage.id,
-    room_id: room.id,
-    chat_room_id: room.id,
-    user_id: dmMessage.user_id,
-    sender_id: dmMessage.user_id,
-    content: dmMessage.content ?? null,
-    text: dmMessage.content ?? null,
-    kind: dmMessage.kind ?? "friend_request",
-    created_at: dmMessage.created_at.toISOString(),
-    updated_at: dmMessage.updated_at.toISOString(),
-    user: dmMessage.user
-      ? { id: dmMessage.user.id, name: dmMessage.user.name, email: dmMessage.user.email }
-      : undefined,
-  };
+  const msg = shapeMessage(dmMessage);
 
-  const payload: WsPacket = {
+  const roomPayload: WsPacket = {
+    ok: true,
     type: "message",
     room_id: room.id,
     roomId: room.id,
     message: msg,
   };
 
-  broadcastToRoom(room.id, payload, "chat:message");
-  broadcastToUser(toId, { type: "notify", room_id: room.id, roomId: room.id, message: msg }, "chat:notify");
-  broadcastToUser(fromId, { type: "notify", room_id: room.id, roomId: room.id, message: msg }, "chat:notify");
+  const notifyPayload: WsPacket = {
+    ok: true,
+    type: "notify",
+    room_id: room.id,
+    roomId: room.id,
+    message: msg,
+  };
+
+  broadcastToRoom(room.id, roomPayload, "chat:message");
+  broadcastToUser(toId, notifyPayload, "chat:notify");
+  broadcastToUser(fromId, notifyPayload, "chat:notify");
 
   let friendship = existing;
   let status = 200;
@@ -409,7 +544,18 @@ export async function sendFriendship(
   const roomFull = await prisma.chatRoom.findUnique({
     where: { id: room.id },
     include: {
-      members: { include: { user: { select: { id: true, name: true, email: true } } } },
+      members: {
+        include: {
+          user: { select: { id: true, name: true, email: true } },
+        },
+      },
+      messages: {
+        orderBy: { created_at: "desc" },
+        take: 1,
+        include: {
+          user: { select: { id: true, name: true, email: true } },
+        },
+      },
     },
   });
 
@@ -418,16 +564,8 @@ export async function sendFriendship(
     body: {
       message: existing ? "درخواست دوستی قبلاً ثبت شده است." : "Friend request sent.",
       friendship,
-      room: roomFull,
-      dm_message: {
-        id: dmMessage.id,
-        chat_room_id: dmMessage.room_id,
-        user_id: dmMessage.user_id,
-        content: dmMessage.content,
-        kind: dmMessage.kind,
-        created_at: dmMessage.created_at,
-        user: dmMessage.user,
-      },
+      room: roomFull ? shapeConversation(roomFull, fromId) : null,
+      dm_message: msg,
     },
   };
 }
